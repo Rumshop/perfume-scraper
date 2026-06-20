@@ -8,14 +8,18 @@ const { chromium } = require("playwright");
 const { createObjectCsvWriter } = require("csv-writer");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 app.use(express.static("public"));
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
-const upload = multer({ dest: "/tmp/uploads/" });
+/**
+ * =========================
+ * UPLOAD
+ * =========================
+ */
+const upload = multer({ dest: "/tmp" });
 
 /**
  * =========================
@@ -28,7 +32,7 @@ async function getBrowser() {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: ["--no-sandbox", "--disable-dev-shm-usage"]
     });
   }
   return browser;
@@ -43,156 +47,117 @@ async function newPage() {
 
 /**
  * =========================
- * CLEAN ROW
+ * ROW NORMALIZER (IMPORTANT FIX)
  * =========================
  */
 function cleanRow(row) {
+  const raw = Object.values(row).join(" ");
+
+  const parts = raw
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ");
+
   return {
-    brand: row.brand || row.Brand || "",
-    product: row.product || row.Product || row.description || ""
+    brand: parts.slice(0, 2).join(" "),
+    product: parts.slice(2).join(" ")
   };
 }
 
 /**
  * =========================
- * SCRAPER (FIXED + RELIABLE)
+ * SCRAPER
  * =========================
  */
-async function scrapeHeinemann(row) {
+async function scrape(row) {
   const page = await newPage();
 
   try {
     const r = cleanRow(row);
     const query = `${r.brand} ${r.product}`.trim();
 
-    if (!query) {
-      await page.close();
-      return null;
-    }
+    if (!query) return null;
 
-    const url =
-      `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`;
+    const url = `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`;
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
-
     await page.waitForTimeout(2000);
 
-    /**
-     * BETTER PRODUCT DETECTION (FIX NO RESULT)
-     */
-    const productLink = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll("a"));
-
-      for (const a of links) {
-        const href = a.href || "";
-        const text = (a.innerText || "").toLowerCase();
-
-        if (!href.includes("/p/")) continue;
-        if (text.length < 8) continue;
-
-        // loose matching (IMPORTANT FIX)
-        if (
-          text.includes("eau") ||
-          text.includes("parfum") ||
-          text.includes("ml") ||
-          text.includes("edt") ||
-          text.includes("edp")
-        ) {
-          return href;
-        }
-      }
-
-      return null;
+    const link = await page.evaluate(() => {
+      const a = [...document.querySelectorAll("a")];
+      const found = a.find(el => el.href.includes("/p/"));
+      return found ? found.href : null;
     });
 
-    if (!productLink) {
-      await page.close();
+    if (!link) {
       return {
         product: query,
-        scraped_price: "NO_RESULT",
-        currency: "NA",
-        cheapest_store: "FAILED",
-        cheapest_price: "NA"
+        price: "NO_RESULT",
+        store: "Heinemann"
       };
     }
 
-    await page.goto(productLink, { waitUntil: "domcontentloaded" });
-
+    await page.goto(link, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
 
-    /**
-     * EXTRACT DATA
-     */
     const data = await page.evaluate(() => {
-      const title =
-        document.querySelector("h1")?.innerText?.trim() || "NA";
-
+      const title = document.querySelector("h1")?.innerText || "NA";
       const text = document.body.innerText;
 
-      const priceMatch = text.match(/€\s?\d{1,4}(?:[.,]\d{2})/);
-
+      const priceMatch = text.match(/€\s?\d+[\.,]\d{2}/);
       const price = priceMatch
-        ? parseFloat(priceMatch[0].replace("€", "").replace(",", "."))
-        : null;
+        ? priceMatch[0].replace("€", "").trim()
+        : "NA";
 
-      return {
-        title,
-        price
-      };
+      return { title, price };
     });
 
-    await page.close();
-
     return {
-      product: data.title || query,
-      scraped_price: data.price || "NA",   // ✅ YOUR REQUIRED COLUMN
-      currency: "EUR",
-      cheapest_store: "Heinemann",
-      cheapest_price: data.price || "NA"
+      product: data.title,
+      price: data.price,
+      store: "Heinemann"
     };
 
   } catch (e) {
-    await page.close();
     return {
       product: "ERROR",
-      scraped_price: "NA",
-      currency: "NA",
-      cheapest_store: "ERROR",
-      cheapest_price: "NA"
+      price: "NA",
+      store: "ERROR"
     };
+  } finally {
+    await page.close();
   }
 }
 
 /**
  * =========================
- * FAST PARALLEL BATCH (FIXED SPEED)
+ * BATCH (FASTER)
  * =========================
  */
 async function runBatch(rows) {
   const results = [];
 
-  const CONCURRENCY = 4; // ⚡ SPEED BOOST
-
-  let index = 0;
+  let i = 0;
+  const workers = 4;
 
   async function worker() {
-    while (index < rows.length) {
-      const i = index++;
-      const result = await scrapeHeinemann(rows[i]);
+    while (i < rows.length) {
+      const index = i++;
+      console.log(`Processing ${index + 1}/${rows.length}`);
+
+      const result = await scrape(rows[index]);
       results.push(result);
     }
   }
 
-  await Promise.all(
-    Array.from({ length: CONCURRENCY }).map(worker)
-  );
+  await Promise.all(Array.from({ length: workers }).map(worker));
 
   return results;
 }
 
 /**
  * =========================
- * CSV PARSER
+ * CSV PARSER (FIXED - NO REGEX BUG)
  * =========================
  */
 function parseCSV(filePath) {
@@ -200,8 +165,8 @@ function parseCSV(filePath) {
     const rows = [];
 
     fs.createReadStream(filePath)
-      .pipe(csv())
-      .on("data", (row) => rows.push(row))
+      .pipe(csv()) // ❌ NO separator REGEX (FIXED CRASH)
+      .on("data", (data) => rows.push(data))
       .on("end", () => resolve(rows))
       .on("error", reject);
   });
@@ -212,26 +177,22 @@ function parseCSV(filePath) {
  * UPLOAD API
  * =========================
  */
-app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
+app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file" });
-
     const rows = await parseCSV(req.file.path);
 
-    console.log("TOTAL ROWS:", rows.length);
+    console.log("ROWS:", rows.length);
 
     const results = await runBatch(rows);
 
-    const outputPath = path.join("/tmp", "report.csv");
+    const file = path.join("/tmp", "report.csv");
 
     const writer = createObjectCsvWriter({
-      path: outputPath,
+      path: file,
       header: [
         { id: "product", title: "product" },
-        { id: "scraped_price", title: "scraped_price" }, // ✅ NEW COLUMN
-        { id: "currency", title: "currency" },
-        { id: "cheapest_store", title: "cheapest_store" },
-        { id: "cheapest_price", title: "cheapest_price" }
+        { id: "price", title: "scraped_price" },
+        { id: "store", title: "store" }
       ]
     });
 
@@ -242,7 +203,7 @@ app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
     res.json({
       success: true,
       total: results.length,
-      download: "/download-report"
+      download: "/download"
     });
 
   } catch (e) {
@@ -256,8 +217,17 @@ app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
  * DOWNLOAD
  * =========================
  */
-app.get("/download-report", (req, res) => {
+app.get("/download", (req, res) => {
   res.download(path.join("/tmp", "report.csv"));
+});
+
+/**
+ * =========================
+ * ROOT
+ * =========================
+ */
+app.get("/", (req, res) => {
+  res.send("Perfume Scraper Running 🚀");
 });
 
 /**
@@ -266,6 +236,5 @@ app.get("/download-report", (req, res) => {
  * =========================
  */
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 PERFUME ENGINE FINAL FAST VERSION");
-  console.log("PORT:", PORT);
+  console.log("🚀 SCRAPER RUNNING ON PORT", PORT);
 });
