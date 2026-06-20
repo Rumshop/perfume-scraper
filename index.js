@@ -1,4 +1,4 @@
-aconst express = require("express");
+const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
@@ -10,6 +10,7 @@ const http = require("http");
 const WebSocket = require("ws");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static("public"));
@@ -18,7 +19,7 @@ const upload = multer({ dest: "uploads/" });
 
 /**
  * =========================
- * SERVER + WS
+ * SERVER + WEBSOCKET
  * =========================
  */
 const server = http.createServer(app);
@@ -28,6 +29,7 @@ let clients = [];
 
 wss.on("connection", (ws) => {
   clients.push(ws);
+
   ws.on("close", () => {
     clients = clients.filter(c => c !== ws);
   });
@@ -35,13 +37,15 @@ wss.on("connection", (ws) => {
 
 function sendProgress(data) {
   clients.forEach(ws => {
-    if (ws.readyState === 1) ws.send(JSON.stringify(data));
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify(data));
+    }
   });
 }
 
 /**
  * =========================
- * BROWSER
+ * BROWSER (FAST + STABLE)
  * =========================
  */
 let browser;
@@ -72,12 +76,16 @@ async function newPage() {
 
 /**
  * =========================
- * CLEAN ROW
+ * CLEAN ROW (CSV FIX)
  * =========================
  */
 function cleanRow(row) {
   const c = (v) =>
-    (v ?? "").toString().replace(/\uFEFF/g, "").replace(/"/g, "").trim();
+    (v ?? "")
+      .toString()
+      .replace(/\uFEFF/g, "")
+      .replace(/"/g, "")
+      .trim();
 
   return {
     brand: c(row.brand || row.Brand),
@@ -89,7 +97,7 @@ function cleanRow(row) {
 
 /**
  * =========================
- * SCRAPER
+ * SCRAPER ENGINE
  * =========================
  */
 async function scrapeHeinemann(row) {
@@ -97,13 +105,17 @@ async function scrapeHeinemann(row) {
 
   try {
     const r = cleanRow(row);
-    if (!r.brand && !r.product) return null;
+
+    if (!r.brand && !r.product) {
+      await page.close();
+      return null;
+    }
 
     const query = `${r.brand} ${r.product}`.toLowerCase();
 
     await page.goto(
       `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`,
-      { waitUntil: "commit" }
+      { waitUntil: "domcontentloaded" }
     );
 
     const candidates = await page.$$eval("a[href*='/p/']", links =>
@@ -113,11 +125,14 @@ async function scrapeHeinemann(row) {
       }))
     );
 
-    if (!candidates.length) return null;
+    if (!candidates.length) {
+      await page.close();
+      return null;
+    }
 
-    let best = candidates[0];
+    const best = candidates[0];
 
-    await page.goto(best.href, { waitUntil: "commit" });
+    await page.goto(best.href, { waitUntil: "domcontentloaded" });
 
     const data = await page.evaluate(() => {
       const title = document.querySelector("h1")?.innerText?.trim() || null;
@@ -162,7 +177,7 @@ async function scrapeHeinemann(row) {
 
 /**
  * =========================
- * BATCH ENGINE + PROGRESS
+ * BATCH + LIVE PROGRESS
  * =========================
  */
 async function runBatch(rows) {
@@ -206,7 +221,7 @@ async function runBatch(rows) {
 
 /**
  * =========================
- * UPLOAD API
+ * UPLOAD CSV API
  * =========================
  */
 app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
@@ -248,7 +263,7 @@ app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
 
 /**
  * =========================
- * DOWNLOAD
+ * DOWNLOAD REPORT
  * =========================
  */
 app.get("/download-report", (req, res) => {
@@ -257,11 +272,11 @@ app.get("/download-report", (req, res) => {
 
 /**
  * =========================
- * START SERVER
+ * RAILWAY SAFE START
  * =========================
  */
-server.listen(3000, () => {
-  console.log("🚀 SCRAPER FULL SYSTEM RUNNING");
-  console.log("POST /upload-csv-ui");
-  console.log("GET /download-report");
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log("🚀 SCRAPER RUNNING ON PORT:", PORT);
 });
