@@ -23,7 +23,7 @@ const upload = multer({ dest: "/tmp" });
 
 /**
  * =========================
- * GLOBAL PROGRESS (SSE)
+ * PROGRESS STREAM (SSE)
  * =========================
  */
 let clients = [];
@@ -48,7 +48,7 @@ function sendProgress(value) {
 
 /**
  * =========================
- * BROWSER
+ * BROWSER SINGLETON
  * =========================
  */
 let browser;
@@ -57,7 +57,10 @@ async function getBrowser() {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"]
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage"
+      ]
     });
   }
   return browser;
@@ -72,7 +75,7 @@ async function newPage() {
 
 /**
  * =========================
- * FIXED CSV PARSER
+ * SAFE CSV PARSER (FIXED EMPTY ISSUE)
  * =========================
  */
 function parseCSV(filePath) {
@@ -80,10 +83,18 @@ function parseCSV(filePath) {
     const rows = [];
 
     fs.createReadStream(filePath)
-      .pipe(csv())
+      .pipe(csv({
+        skipEmptyLines: true,
+        mapHeaders: ({ header }) => header.trim()
+      }))
       .on("data", (row) => {
-        const text = Object.values(row).join(" ").trim();
-        if (text) rows.push({ raw: text });
+        const values = Object.values(row)
+          .map(v => (v || "").toString().trim())
+          .filter(Boolean);
+
+        if (values.length) {
+          rows.push({ raw: values.join(" ") });
+        }
       })
       .on("end", () => resolve(rows))
       .on("error", reject);
@@ -92,11 +103,15 @@ function parseCSV(filePath) {
 
 /**
  * =========================
- * ROW CLEANER (IMPORTANT FIX)
+ * CLEAN ROW (FIXED)
  * =========================
  */
 function cleanRow(row) {
-  const parts = (row.raw || "").split(" ");
+  const text = (row.raw || "").replace(/\s+/g, " ").trim();
+
+  if (!text) return { brand: "", product: "" };
+
+  const parts = text.split(" ");
 
   return {
     brand: parts.slice(0, 2).join(" "),
@@ -106,7 +121,7 @@ function cleanRow(row) {
 
 /**
  * =========================
- * SCRAPER
+ * SCRAPER (STABLE)
  * =========================
  */
 async function scrape(row) {
@@ -117,6 +132,8 @@ async function scrape(row) {
     const query = `${r.brand} ${r.product}`.trim();
 
     if (!query) return null;
+
+    console.log("SCRAPING:", query);
 
     const url = `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`;
 
@@ -156,6 +173,8 @@ async function scrape(row) {
     };
 
   } catch (e) {
+    console.error("SCRAPE ERROR:", e.message);
+
     return {
       product: "ERROR",
       price: "NA",
@@ -168,19 +187,31 @@ async function scrape(row) {
 
 /**
  * =========================
- * BATCH SCRAPER + PROGRESS
+ * FAST PARALLEL BATCH (FIXED SPEED)
  * =========================
  */
 async function runBatch(rows) {
   const results = [];
+  let index = 0;
 
-  for (let i = 0; i < rows.length; i++) {
-    const progress = Math.round((i / rows.length) * 100);
-    sendProgress(progress);
+  const CONCURRENCY = 5; // adjust 3–10
 
-    const result = await scrape(rows[i]);
-    results.push(result);
+  async function worker() {
+    while (index < rows.length) {
+      const i = index++;
+
+      const progress = Math.round((i / rows.length) * 100);
+      sendProgress(progress);
+
+      const result = await scrape(rows[i]);
+
+      if (result) results.push(result);
+    }
   }
+
+  await Promise.all(
+    Array(CONCURRENCY).fill().map(worker)
+  );
 
   sendProgress(100);
 
@@ -194,9 +225,13 @@ async function runBatch(rows) {
  */
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
     const rows = await parseCSV(req.file.path);
 
-    console.log("ROWS:", rows.length);
+    console.log("TOTAL ROWS:", rows.length);
 
     const results = await runBatch(rows);
 
@@ -217,22 +252,28 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     res.json({
       success: true,
+      total: results.length,
       download: "/download"
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("UPLOAD ERROR:", err);
+
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
 /**
  * =========================
- * DOWNLOAD
+ * DOWNLOAD REPORT
  * =========================
  */
 app.get("/download", (req, res) => {
-  res.download(path.join("/tmp", "report.csv"));
+  const file = path.join("/tmp", "report.csv");
+  res.download(file);
 });
 
 /**
@@ -241,6 +282,6 @@ app.get("/download", (req, res) => {
  * =========================
  */
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 PERFUME SCRAPER RUNNING");
+  console.log("🚀 PERFUME SCRAPER READY");
   console.log("PORT:", PORT);
 });

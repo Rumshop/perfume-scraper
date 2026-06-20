@@ -3,35 +3,79 @@
 <head>
   <title>Perfume Scraper</title>
   <style>
-    body { font-family: Arial; text-align:center; padding:40px; }
-    .bar { width:100%; background:#eee; height:25px; border-radius:10px; overflow:hidden; }
-    .fill { height:100%; width:0%; background:green; transition:0.3s; }
-    button { padding:10px 20px; margin-top:20px; }
+    body {
+      font-family: Arial;
+      text-align: center;
+      padding: 40px;
+      background: #f5f5f5;
+    }
+
+    .box {
+      background: white;
+      padding: 30px;
+      border-radius: 12px;
+      width: 400px;
+      margin: auto;
+      box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+    }
+
+    .bar {
+      width: 100%;
+      height: 25px;
+      background: #ddd;
+      border-radius: 20px;
+      overflow: hidden;
+      margin-top: 20px;
+    }
+
+    .fill {
+      height: 100%;
+      width: 0%;
+      background: #4CAF50;
+      transition: 0.3s;
+    }
+
+    button {
+      margin-top: 15px;
+      padding: 10px 20px;
+      cursor: pointer;
+    }
+
+    a {
+      display: none;
+      margin-top: 15px;
+    }
   </style>
 </head>
 
 <body>
 
-<h2>Perfume Scraper 🚀</h2>
+<div class="box">
+  <h2>Perfume Scraper 🚀</h2>
 
-<input type="file" id="file" />
-<button onclick="upload()">Upload</button>
+  <input type="file" id="file" />
+  <br>
 
-<div class="bar" style="margin-top:20px;">
-  <div class="fill" id="fill"></div>
+  <button onclick="upload()">Upload</button>
+
+  <div class="bar">
+    <div class="fill" id="fill"></div>
+  </div>
+
+  <p id="status">Waiting...</p>
+
+  <a id="download" href="/download">Download Report</a>
 </div>
-
-<p id="status">Waiting...</p>
-
-<a id="download" style="display:none;" href="/download">Download Report</a>
 
 <script>
 const evt = new EventSource("/progress");
 
 evt.onmessage = (e) => {
   const data = JSON.parse(e.data);
+
   document.getElementById("fill").style.width = data.progress + "%";
-  document.getElementById("status").innerText = "Progress: " + data.progress + "%";
+  document.getElementById("status").innerText =
+    "Progress: " + data.progress + "%";
 };
 
 async function upload() {
@@ -49,8 +93,10 @@ async function upload() {
 
   const data = await res.json();
 
-  document.getElementById("status").innerText = "Done!";
-  document.getElementById("download").style.display = "block";
+  if (data.success) {
+    document.getElementById("status").innerText = "Done!";
+    document.getElementById("download").style.display = "block";
+  }
 }
 </script>
 
