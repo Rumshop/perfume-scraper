@@ -16,14 +16,14 @@ const PORT = process.env.PORT || 3000;
 
 /**
  * =========================
- * FILE UPLOAD
+ * UPLOAD
  * =========================
  */
 const upload = multer({ dest: "/tmp" });
 
 /**
  * =========================
- * PROGRESS STREAM (SSE)
+ * PROGRESS SSE
  * =========================
  */
 let clients = [];
@@ -57,10 +57,7 @@ async function getBrowser() {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage"
-      ]
+      args: ["--no-sandbox", "--disable-dev-shm-usage"]
     });
   }
   return browser;
@@ -75,7 +72,7 @@ async function newPage() {
 
 /**
  * =========================
- * SAFE CSV PARSER (FIXED EMPTY ISSUE)
+ * FIXED CSV PARSER (IMPORTANT)
  * =========================
  */
 function parseCSV(filePath) {
@@ -83,16 +80,13 @@ function parseCSV(filePath) {
     const rows = [];
 
     fs.createReadStream(filePath)
-      .pipe(csv({
-        skipEmptyLines: true,
-        mapHeaders: ({ header }) => header.trim()
-      }))
+      .pipe(csv({ strict: false }))
       .on("data", (row) => {
         const values = Object.values(row)
           .map(v => (v || "").toString().trim())
           .filter(Boolean);
 
-        if (values.length) {
+        if (values.length > 0) {
           rows.push({ raw: values.join(" ") });
         }
       })
@@ -109,8 +103,6 @@ function parseCSV(filePath) {
 function cleanRow(row) {
   const text = (row.raw || "").replace(/\s+/g, " ").trim();
 
-  if (!text) return { brand: "", product: "" };
-
   const parts = text.split(" ");
 
   return {
@@ -121,7 +113,7 @@ function cleanRow(row) {
 
 /**
  * =========================
- * SCRAPER (STABLE)
+ * SCRAPER
  * =========================
  */
 async function scrape(row) {
@@ -131,7 +123,13 @@ async function scrape(row) {
     const r = cleanRow(row);
     const query = `${r.brand} ${r.product}`.trim();
 
-    if (!query) return null;
+    if (!query || query.length < 3) {
+      return {
+        product: "INVALID",
+        price: "NA",
+        store: "SKIPPED"
+      };
+    }
 
     console.log("SCRAPING:", query);
 
@@ -141,8 +139,9 @@ async function scrape(row) {
     await page.waitForTimeout(2000);
 
     const link = await page.evaluate(() => {
-      return [...document.querySelectorAll("a")]
-        .find(a => a.href.includes("/p/"))?.href || null;
+      const a = [...document.querySelectorAll("a")]
+        .find(x => x.href && x.href.includes("/p/"));
+      return a ? a.href : null;
     });
 
     if (!link) {
@@ -158,22 +157,24 @@ async function scrape(row) {
 
     const data = await page.evaluate(() => {
       const title = document.querySelector("h1")?.innerText || "NA";
+
       const text = document.body.innerText;
-
       const priceMatch = text.match(/€\s?\d+[\.,]\d{2}/);
-      const price = priceMatch ? priceMatch[0] : "NA";
 
-      return { title, price };
+      return {
+        title,
+        price: priceMatch ? priceMatch[0] : "NA"
+      };
     });
 
     return {
-      product: data.title,
-      price: data.price,
+      product: data.title || query,
+      price: data.price || "NA",
       store: "Heinemann"
     };
 
-  } catch (e) {
-    console.error("SCRAPE ERROR:", e.message);
+  } catch (err) {
+    console.error("SCRAPE ERROR:", err.message);
 
     return {
       product: "ERROR",
@@ -187,14 +188,14 @@ async function scrape(row) {
 
 /**
  * =========================
- * FAST PARALLEL BATCH (FIXED SPEED)
+ * FAST PARALLEL BATCH (FIX SPEED)
  * =========================
  */
 async function runBatch(rows) {
   const results = [];
   let index = 0;
 
-  const CONCURRENCY = 5; // adjust 3–10
+  const CONCURRENCY = 5;
 
   async function worker() {
     while (index < rows.length) {
@@ -235,10 +236,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     const results = await runBatch(rows);
 
-    const filePath = path.join("/tmp", "report.csv");
+    const outputPath = path.join("/tmp", "report.csv");
 
     const writer = createObjectCsvWriter({
-      path: filePath,
+      path: outputPath,
       header: [
         { id: "product", title: "product" },
         { id: "price", title: "scraped_price" },
@@ -268,12 +269,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 /**
  * =========================
- * DOWNLOAD REPORT
+ * DOWNLOAD
  * =========================
  */
 app.get("/download", (req, res) => {
-  const file = path.join("/tmp", "report.csv");
-  res.download(file);
+  res.download(path.join("/tmp", "report.csv"));
 });
 
 /**
