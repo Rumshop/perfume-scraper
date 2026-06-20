@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Perfume Scraper UI</title>
+</head>
+<body>
+
+<h1>Perfume Scraper</h1>
+
+<input type="file" id="file" />
+<button onclick="upload()">Upload CSV</button>
+
+<p id="status"></p>
+<a id="download" href=""></a>
+
+<script>
+async function upload() {
+  const file = document.getElementById("file").files[0];
+
+  const form = new FormData();
+  form.append("file", file);
+
+  document.getElementById("status").innerText = "Uploading...";
+
+  const res = await fetch("/upload-csv-ui", {
+    method: "POST",
+    body: form
+  });
+
+  const data = await res.json();
+
+  document.getElementById("status").innerText =
+    "Done! Rows: " + data.total;
+
+  document.getElementById("download").href = data.download;
+  document.getElementById("download").innerText = "Download Report";
+}
+</script>
+
+</body>
+</html>
