@@ -3,9 +3,9 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
-const csv = require("csv-parser");
 const { chromium } = require("playwright");
 const { createObjectCsvWriter } = require("csv-writer");
+const fastcsv = require("fast-csv");
 
 const app = express();
 
@@ -17,14 +17,10 @@ const upload = multer({ dest: "uploads/" });
 
 /**
  * =========================
- * GLOBAL PROGRESS STORE
+ * PROGRESS
  * =========================
  */
-let progress = {
-  total: 0,
-  done: 0,
-  running: false
-};
+let progress = { total: 0, done: 0, running: false };
 
 app.get("/progress", (req, res) => {
   res.json(progress);
@@ -56,11 +52,7 @@ async function newPage() {
  */
 function cleanRow(row) {
   const c = (v) =>
-    (v ?? "")
-      .toString()
-      .replace(/\uFEFF/g, "")
-      .replace(/"/g, "")
-      .trim();
+    (v ?? "").toString().replace(/\uFEFF/g, "").replace(/"/g, "").trim();
 
   return {
     brand: c(row.brand || row.Brand),
@@ -94,9 +86,9 @@ async function scrapeHeinemann(row) {
 
     const candidates = await page.evaluate(() => {
       return Array.from(document.querySelectorAll("a"))
-        .map(el => ({
-          text: el.innerText || "",
-          href: el.href || ""
+        .map(a => ({
+          text: a.innerText || "",
+          href: a.href || ""
         }))
         .filter(x => x.href.includes("/p/") && x.text.length > 20)
         .slice(0, 15);
@@ -107,9 +99,7 @@ async function scrapeHeinemann(row) {
       return null;
     }
 
-    let best = candidates[0];
-
-    await page.goto(best.href, { waitUntil: "domcontentloaded" });
+    await page.goto(candidates[0].href, { waitUntil: "domcontentloaded" });
 
     const data = await page.evaluate(() => {
       const title = document.querySelector("h1")?.innerText || null;
@@ -131,10 +121,10 @@ async function scrapeHeinemann(row) {
 
     return {
       product: data.title,
-      scraped_price: data.price,   // 🔥 SEPARATE COLUMN
+      scraped_price: data.price,
       currency: "EUR",
       size: data.size,
-      store: "Heinemann"
+      store: "Heinemann",
     };
 
   } catch (e) {
@@ -145,7 +135,7 @@ async function scrapeHeinemann(row) {
 
 /**
  * =========================
- * BATCH ENGINE + PROGRESS
+ * BATCH
  * =========================
  */
 async function runBatch(rows) {
@@ -166,11 +156,11 @@ async function runBatch(rows) {
 
       results.push(
         result || {
-          product: `${r.brand} ${r.product}`.trim(),
+          product: `${r.brand} ${r.product}`,
           scraped_price: "NA",
           currency: "NA",
           size: "NA",
-          store: "NO_RESULT"
+          store: "NO_RESULT",
         }
       );
 
@@ -178,11 +168,7 @@ async function runBatch(rows) {
     }
   }
 
-  await Promise.all([
-    worker(),
-    worker(),
-    worker()
-  ]);
+  await Promise.all([worker(), worker(), worker()]);
 
   progress.running = false;
   return results;
@@ -190,19 +176,17 @@ async function runBatch(rows) {
 
 /**
  * =========================
- * UPLOAD API
+ * UPLOAD (FIXED CSV PARSER)
  * =========================
  */
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
-    }
+    if (!req.file) return res.status(400).json({ error: "No file" });
 
     const rows = [];
 
     fs.createReadStream(req.file.path)
-      .pipe(csv({ separator: /[\t,;]/ }))
+      .pipe(fastcsv.parse({ headers: true, delimiter: /[\t,;]/ }))
       .on("data", (row) => rows.push(row))
       .on("end", async () => {
 
@@ -217,8 +201,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
             { id: "scraped_price", title: "scraped_price" },
             { id: "currency", title: "currency" },
             { id: "size", title: "size" },
-            { id: "store", title: "store" }
-          ]
+            { id: "store", title: "store" },
+          ],
         });
 
         await writer.writeRecords(results);
@@ -227,13 +211,13 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
         res.json({
           success: true,
-          download: "/download"
+          download: "/download",
         });
       });
 
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({ error: "Server error" });
+  } catch (e) {
+    console.log(e);
+    res.status(500).json({ error: "Server crash" });
   }
 });
 
@@ -252,7 +236,7 @@ app.get("/download", (req, res) => {
  * =========================
  */
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 SCRAPER READY");
+  console.log("🚀 FIXED SCRAPER RUNNING");
   console.log("POST /upload");
   console.log("GET /download");
   console.log("GET /progress");
