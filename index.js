@@ -1,4 +1,4 @@
-const express = require("express");
+aconst express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
@@ -6,49 +6,52 @@ const multer = require("multer");
 const csv = require("csv-parser");
 const { chromium } = require("playwright");
 const { createObjectCsvWriter } = require("csv-writer");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 app.use(express.static("public"));
 
-/**
- * =========================
- * RAILWAY PORT FIX
- * =========================
- */
-const PORT = process.env.PORT || 8080;
+const upload = multer({ dest: "uploads/" });
 
 /**
  * =========================
- * UPLOAD CONFIG (RAILWAY SAFE)
+ * SERVER + WS
  * =========================
  */
-const upload = multer({ dest: "/tmp/uploads/" });
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+let clients = [];
+
+wss.on("connection", (ws) => {
+  clients.push(ws);
+  ws.on("close", () => {
+    clients = clients.filter(c => c !== ws);
+  });
+});
+
+function sendProgress(data) {
+  clients.forEach(ws => {
+    if (ws.readyState === 1) ws.send(JSON.stringify(data));
+  });
+}
 
 /**
  * =========================
- * BROWSER INSTANCE (FIXED)
+ * BROWSER
  * =========================
  */
 let browser;
 
 async function getBrowser() {
   if (!browser) {
-    try {
-      browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage"
-        ]
-      });
-    } catch (err) {
-      console.error("BROWSER LAUNCH ERROR:", err);
-      throw err;
-    }
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"]
+    });
   }
   return browser;
 }
@@ -56,46 +59,37 @@ async function getBrowser() {
 async function newPage() {
   const b = await getBrowser();
   const page = await b.newPage();
-  page.setDefaultTimeout(30000);
+
+  await page.route("**/*", (route) => {
+    const type = route.request().resourceType();
+    if (["image", "font", "media"].includes(type)) return route.abort();
+    route.continue();
+  });
+
+  page.setDefaultTimeout(15000);
   return page;
 }
 
 /**
  * =========================
- * SAFE CSV PARSER
- * =========================
- */
-function parseCSV(filePath) {
-  return new Promise((resolve, reject) => {
-    const rows = [];
-
-    fs.createReadStream(filePath)
-      .pipe(csv())
-      .on("data", (row) => {
-        if (row && Object.keys(row).length > 0) {
-          rows.push(row);
-        }
-      })
-      .on("end", () => resolve(rows))
-      .on("error", reject);
-  });
-}
-
-/**
- * =========================
- * CLEAN INPUT
+ * CLEAN ROW
  * =========================
  */
 function cleanRow(row) {
+  const c = (v) =>
+    (v ?? "").toString().replace(/\uFEFF/g, "").replace(/"/g, "").trim();
+
   return {
-    brand: row.brand || row.Brand || "",
-    product: row.product || row.Product || row.description || ""
+    brand: c(row.brand || row.Brand),
+    product: c(row.product || row.Product || row.description),
+    type: c(row.type),
+    size: c(row.size)
   };
 }
 
 /**
  * =========================
- * SCRAPER CORE (SAFE)
+ * SCRAPER
  * =========================
  */
 async function scrapeHeinemann(row) {
@@ -103,208 +97,171 @@ async function scrapeHeinemann(row) {
 
   try {
     const r = cleanRow(row);
-    const query = `${r.brand} ${r.product}`.trim();
+    if (!r.brand && !r.product) return null;
 
-    if (!query) {
-      await page.close();
-      return null;
-    }
+    const query = `${r.brand} ${r.product}`.toLowerCase();
 
-    const url = `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`;
+    await page.goto(
+      `https://www.heinemann-shop.com/en/global/search?q=${encodeURIComponent(query)}`,
+      { waitUntil: "commit" }
+    );
 
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    const candidates = await page.$$eval("a[href*='/p/']", links =>
+      links.slice(0, 10).map(a => ({
+        text: (a.innerText || "").trim(),
+        href: a.href
+      }))
+    );
 
-    const links = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("a"))
-        .map(a => ({
-          text: a.innerText,
-          href: a.href
-        }))
-        .filter(a =>
-          a.href.includes("/p/") &&
-          a.text &&
-          a.text.length > 10
-        )
-        .slice(0, 10);
-    });
+    if (!candidates.length) return null;
 
-    if (!links.length) {
-      await page.close();
-      return null;
-    }
+    let best = candidates[0];
 
-    await page.goto(links[0].href, { waitUntil: "domcontentloaded" });
+    await page.goto(best.href, { waitUntil: "commit" });
 
     const data = await page.evaluate(() => {
+      const title = document.querySelector("h1")?.innerText?.trim() || null;
       const text = document.body.innerText;
 
-      const priceMatch = text.match(/€\s?\d+[.,]\d{2}/);
+      const priceMatch = text.match(/€\s?\d{1,4}[.,]\d{2}/);
 
       const price = priceMatch
         ? parseFloat(priceMatch[0].replace("€", "").replace(",", "."))
         : null;
 
-      const title = document.querySelector("h1")?.innerText || "NA";
+      const size = text.match(/(\d+)\s?ml/i)?.[1] || "NA";
 
-      return {
-        title,
-        price
-      };
+      const type =
+        text.toLowerCase().includes("eau de parfum") ? "edp" :
+        text.toLowerCase().includes("eau de toilette") ? "edt" :
+        "NA";
+
+      return { title, price, size, type };
     });
 
     await page.close();
 
+    if (!data.title || !data.price) return null;
+
     return {
       product: data.title,
-      heinemann_price: data.price || "NA",
+      heinemann_price: data.price,
+      scraped_price: data.price,
       currency: "EUR",
+      size: data.size,
+      type: data.type,
       cheapest_store: "Heinemann",
-      cheapest_price: data.price || "NA"
+      cheapest_price: data.price
     };
 
-  } catch (err) {
+  } catch (e) {
     await page.close();
-    console.error("SCRAPER ERROR:", err);
     return null;
   }
 }
 
 /**
  * =========================
- * BATCH ENGINE
+ * BATCH ENGINE + PROGRESS
  * =========================
  */
 async function runBatch(rows) {
-  const results = [];
+  const results = new Array(rows.length);
+  let index = 0;
+  const WORKERS = 4;
 
-  for (let i = 0; i < rows.length; i++) {
-    console.log(`PROCESSING ${i + 1}/${rows.length}`);
+  async function worker() {
+    while (true) {
+      const i = index++;
+      if (i >= rows.length) break;
 
-    try {
+      sendProgress({
+        current: i + 1,
+        total: rows.length,
+        percent: Math.round(((i + 1) / rows.length) * 100)
+      });
+
       const result = await scrapeHeinemann(rows[i]);
-      const clean = cleanRow(rows[i]);
+      const r = cleanRow(rows[i]);
 
-      results.push(
-        result || {
-          product: clean.product || "UNKNOWN",
-          heinemann_price: "NA",
-          currency: "NA",
-          cheapest_store: "NO_RESULT",
-          cheapest_price: "NA"
-        }
-      );
-    } catch (err) {
-      console.error("ROW ERROR:", err);
+      results[i] = result || {
+        product: `${r.brand} ${r.product}`.trim(),
+        heinemann_price: "NA",
+        scraped_price: "NA",
+        currency: "NA",
+        size: "NA",
+        type: "NA",
+        cheapest_store: "NO_RESULT",
+        cheapest_price: "NA"
+      };
     }
   }
+
+  await Promise.all(Array.from({ length: WORKERS }, worker));
+
+  sendProgress({ done: true });
 
   return results;
 }
 
 /**
  * =========================
- * HOME PAGE
- * =========================
- */
-app.get("/", (req, res) => {
-  res.send("🚀 PERFUME ENGINE RUNNING");
-});
-
-/**
- * =========================
- * TEST API
- * =========================
- */
-app.get("/compare", async (req, res) => {
-  try {
-    const q = req.query.q;
-
-    const result = await scrapeHeinemann({
-      brand: "",
-      product: q
-    });
-
-    res.json({
-      success: true,
-      result
-    });
-
-  } catch (err) {
-    console.error("COMPARE ERROR:", err);
-
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-/**
- * =========================
- * CSV UPLOAD
+ * UPLOAD API
  * =========================
  */
 app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
-    }
+  const rows = [];
 
-    const rows = await parseCSV(req.file.path);
+  fs.createReadStream(req.file.path)
+    .pipe(csv({ separator: /[\t,;]/ }))
+    .on("data", (row) => rows.push(row))
+    .on("end", async () => {
 
-    console.log("TOTAL ROWS:", rows.length);
+      const results = await runBatch(rows);
 
-    const results = await runBatch(rows);
+      const outputPath = path.join(__dirname, "report.csv");
 
-    const outputPath = path.join("/tmp", "report.csv");
+      const writer = createObjectCsvWriter({
+        path: outputPath,
+        header: [
+          { id: "product", title: "product" },
+          { id: "heinemann_price", title: "heinemann_price" },
+          { id: "scraped_price", title: "scraped_price" },
+          { id: "currency", title: "currency" },
+          { id: "size", title: "size" },
+          { id: "type", title: "type" },
+          { id: "cheapest_store", title: "cheapest_store" },
+          { id: "cheapest_price", title: "cheapest_price" }
+        ]
+      });
 
-    const writer = createObjectCsvWriter({
-      path: outputPath,
-      header: [
-        { id: "product", title: "product" },
-        { id: "heinemann_price", title: "heinemann_price" },
-        { id: "currency", title: "currency" },
-        { id: "cheapest_store", title: "cheapest_store" },
-        { id: "cheapest_price", title: "cheapest_price" }
-      ]
+      await writer.writeRecords(results);
+
+      fs.unlinkSync(req.file.path);
+
+      res.json({
+        success: true,
+        download: "/download-report"
+      });
     });
-
-    await writer.writeRecords(results);
-
-    fs.unlinkSync(req.file.path);
-
-    res.json({
-      success: true,
-      total: results.length,
-      download: "/download-report"
-    });
-
-  } catch (err) {
-    console.error("UPLOAD ERROR:", err);
-
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
 });
 
 /**
  * =========================
- * DOWNLOAD REPORT
+ * DOWNLOAD
  * =========================
  */
 app.get("/download-report", (req, res) => {
-  const file = path.join("/tmp", "report.csv");
-  res.download(file);
+  res.download(path.join(__dirname, "report.csv"));
 });
 
 /**
  * =========================
- * START SERVER (CRITICAL FOR RAILWAY)
+ * START SERVER
  * =========================
  */
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 PERFUME ENGINE LIVE");
-  console.log("PORT:", PORT);
+server.listen(3000, () => {
+  console.log("🚀 SCRAPER FULL SYSTEM RUNNING");
+  console.log("POST /upload-csv-ui");
+  console.log("GET /download-report");
 });

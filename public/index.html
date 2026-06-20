@@ -1,39 +1,62 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Perfume Scraper UI</title>
+  <title>Perfume Scraper</title>
+  <style>
+    body { font-family: Arial; background:#111; color:white; padding:40px; }
+    .box { max-width:600px; margin:auto; background:#222; padding:20px; border-radius:10px; }
+    input, button { width:100%; padding:10px; margin-top:10px; }
+    button { background:#00c853; border:none; color:white; }
+
+    .bar { height:20px; background:#333; margin-top:20px; border-radius:10px; overflow:hidden; }
+    .fill { height:100%; width:0%; background:lime; transition:0.3s; }
+  </style>
 </head>
 <body>
 
-<h1>Perfume Scraper</h1>
+<div class="box">
+  <h2>Perfume Scraper</h2>
 
-<input type="file" id="file" />
-<button onclick="upload()">Upload CSV</button>
+  <input type="file" id="file">
+  <button onclick="upload()">Upload</button>
 
-<p id="status"></p>
-<a id="download" href=""></a>
+  <div class="bar">
+    <div class="fill" id="fill"></div>
+  </div>
+
+  <div id="status">Waiting...</div>
+
+  <a id="download" style="display:none" href="/download-report">Download Report</a>
+</div>
 
 <script>
-async function upload() {
+const ws = new WebSocket("ws://localhost:3000");
+
+ws.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+
+  if (d.percent !== undefined) {
+    document.getElementById("fill").style.width = d.percent + "%";
+    document.getElementById("status").innerText =
+      `Scraping ${d.current}/${d.total} (${d.percent}%)`;
+  }
+
+  if (d.done) {
+    document.getElementById("status").innerText = "Done ✅";
+    document.getElementById("download").style.display = "block";
+  }
+};
+
+function upload() {
   const file = document.getElementById("file").files[0];
 
-  const form = new FormData();
-  form.append("file", file);
+  const fd = new FormData();
+  fd.append("file", file);
 
-  document.getElementById("status").innerText = "Uploading...";
-
-  const res = await fetch("/upload-csv-ui", {
+  fetch("/upload-csv-ui", {
     method: "POST",
-    body: form
+    body: fd
   });
-
-  const data = await res.json();
-
-  document.getElementById("status").innerText =
-    "Done! Rows: " + data.total;
-
-  document.getElementById("download").href = data.download;
-  document.getElementById("download").innerText = "Download Report";
 }
 </script>
 
