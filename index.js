@@ -16,10 +16,35 @@ const PORT = process.env.PORT || 3000;
 
 /**
  * =========================
- * UPLOAD
+ * FILE UPLOAD
  * =========================
  */
 const upload = multer({ dest: "/tmp" });
+
+/**
+ * =========================
+ * GLOBAL PROGRESS (SSE)
+ * =========================
+ */
+let clients = [];
+
+app.get("/progress", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  clients.push(res);
+
+  req.on("close", () => {
+    clients = clients.filter(c => c !== res);
+  });
+});
+
+function sendProgress(value) {
+  clients.forEach(res => {
+    res.write(`data: ${JSON.stringify({ progress: value })}\n\n`);
+  });
+}
 
 /**
  * =========================
@@ -47,16 +72,31 @@ async function newPage() {
 
 /**
  * =========================
- * ROW NORMALIZER (IMPORTANT FIX)
+ * FIXED CSV PARSER
+ * =========================
+ */
+function parseCSV(filePath) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+
+    fs.createReadStream(filePath)
+      .pipe(csv())
+      .on("data", (row) => {
+        const text = Object.values(row).join(" ").trim();
+        if (text) rows.push({ raw: text });
+      })
+      .on("end", () => resolve(rows))
+      .on("error", reject);
+  });
+}
+
+/**
+ * =========================
+ * ROW CLEANER (IMPORTANT FIX)
  * =========================
  */
 function cleanRow(row) {
-  const raw = Object.values(row).join(" ");
-
-  const parts = raw
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ");
+  const parts = (row.raw || "").split(" ");
 
   return {
     brand: parts.slice(0, 2).join(" "),
@@ -84,9 +124,8 @@ async function scrape(row) {
     await page.waitForTimeout(2000);
 
     const link = await page.evaluate(() => {
-      const a = [...document.querySelectorAll("a")];
-      const found = a.find(el => el.href.includes("/p/"));
-      return found ? found.href : null;
+      return [...document.querySelectorAll("a")]
+        .find(a => a.href.includes("/p/"))?.href || null;
     });
 
     if (!link) {
@@ -105,9 +144,7 @@ async function scrape(row) {
       const text = document.body.innerText;
 
       const priceMatch = text.match(/€\s?\d+[\.,]\d{2}/);
-      const price = priceMatch
-        ? priceMatch[0].replace("€", "").trim()
-        : "NA";
+      const price = priceMatch ? priceMatch[0] : "NA";
 
       return { title, price };
     });
@@ -131,50 +168,28 @@ async function scrape(row) {
 
 /**
  * =========================
- * BATCH (FASTER)
+ * BATCH SCRAPER + PROGRESS
  * =========================
  */
 async function runBatch(rows) {
   const results = [];
 
-  let i = 0;
-  const workers = 4;
+  for (let i = 0; i < rows.length; i++) {
+    const progress = Math.round((i / rows.length) * 100);
+    sendProgress(progress);
 
-  async function worker() {
-    while (i < rows.length) {
-      const index = i++;
-      console.log(`Processing ${index + 1}/${rows.length}`);
-
-      const result = await scrape(rows[index]);
-      results.push(result);
-    }
+    const result = await scrape(rows[i]);
+    results.push(result);
   }
 
-  await Promise.all(Array.from({ length: workers }).map(worker));
+  sendProgress(100);
 
   return results;
 }
 
 /**
  * =========================
- * CSV PARSER (FIXED - NO REGEX BUG)
- * =========================
- */
-function parseCSV(filePath) {
-  return new Promise((resolve, reject) => {
-    const rows = [];
-
-    fs.createReadStream(filePath)
-      .pipe(csv()) // ❌ NO separator REGEX (FIXED CRASH)
-      .on("data", (data) => rows.push(data))
-      .on("end", () => resolve(rows))
-      .on("error", reject);
-  });
-}
-
-/**
- * =========================
- * UPLOAD API
+ * UPLOAD ROUTE
  * =========================
  */
 app.post("/upload", upload.single("file"), async (req, res) => {
@@ -185,10 +200,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     const results = await runBatch(rows);
 
-    const file = path.join("/tmp", "report.csv");
+    const filePath = path.join("/tmp", "report.csv");
 
     const writer = createObjectCsvWriter({
-      path: file,
+      path: filePath,
       header: [
         { id: "product", title: "product" },
         { id: "price", title: "scraped_price" },
@@ -202,13 +217,12 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     res.json({
       success: true,
-      total: results.length,
       download: "/download"
     });
 
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -223,18 +237,10 @@ app.get("/download", (req, res) => {
 
 /**
  * =========================
- * ROOT
- * =========================
- */
-app.get("/", (req, res) => {
-  res.send("Perfume Scraper Running 🚀");
-});
-
-/**
- * =========================
- * START
+ * START SERVER
  * =========================
  */
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 SCRAPER RUNNING ON PORT", PORT);
+  console.log("🚀 PERFUME SCRAPER RUNNING");
+  console.log("PORT:", PORT);
 });

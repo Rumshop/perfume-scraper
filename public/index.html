@@ -2,81 +2,45 @@
 <html>
 <head>
   <title>Perfume Scraper</title>
-
   <style>
-    body {
-      font-family: Arial;
-      background: #0f172a;
-      color: white;
-      text-align: center;
-      padding: 40px;
-    }
-
-    .box {
-      background: #1e293b;
-      padding: 20px;
-      border-radius: 12px;
-      width: 400px;
-      margin: auto;
-    }
-
-    input {
-      width: 100%;
-      padding: 10px;
-      margin: 10px 0;
-    }
-
-    button {
-      padding: 10px;
-      width: 100%;
-      cursor: pointer;
-    }
-
-    .bar {
-      width: 100%;
-      background: #334155;
-      height: 20px;
-      border-radius: 10px;
-      margin-top: 15px;
-    }
-
-    .fill {
-      height: 20px;
-      width: 0%;
-      background: limegreen;
-      border-radius: 10px;
-    }
+    body { font-family: Arial; text-align:center; padding:40px; }
+    .bar { width:100%; background:#eee; height:25px; border-radius:10px; overflow:hidden; }
+    .fill { height:100%; width:0%; background:green; transition:0.3s; }
+    button { padding:10px 20px; margin-top:20px; }
   </style>
 </head>
 
 <body>
 
-<div class="box">
-  <h2>Perfume Scraper</h2>
+<h2>Perfume Scraper 🚀</h2>
 
-  <input type="file" id="file" />
+<input type="file" id="file" />
+<button onclick="upload()">Upload</button>
 
-  <button onclick="upload()">UPLOAD</button>
-
-  <div class="bar">
-    <div class="fill" id="fill"></div>
-  </div>
-
-  <p id="text">Waiting...</p>
-
-  <a id="download" href="/download" style="display:none;color:cyan;">
-    Download Report
-  </a>
+<div class="bar" style="margin-top:20px;">
+  <div class="fill" id="fill"></div>
 </div>
 
+<p id="status">Waiting...</p>
+
+<a id="download" style="display:none;" href="/download">Download Report</a>
+
 <script>
+const evt = new EventSource("/progress");
+
+evt.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+  document.getElementById("fill").style.width = data.progress + "%";
+  document.getElementById("status").innerText = "Progress: " + data.progress + "%";
+};
+
 async function upload() {
   const file = document.getElementById("file").files[0];
 
   const form = new FormData();
   form.append("file", file);
 
-  document.getElementById("text").innerText = "Uploading...";
+  document.getElementById("status").innerText = "Uploading...";
 
   const res = await fetch("/upload", {
     method: "POST",
@@ -85,29 +49,8 @@ async function upload() {
 
   const data = await res.json();
 
-  if (data.success) {
-    document.getElementById("text").innerText = "Processing...";
-    startProgress();
-  }
-}
-
-async function startProgress() {
-  const interval = setInterval(async () => {
-    const res = await fetch("/progress");
-    const data = await res.json();
-
-    const percent = Math.round((data.done / data.total) * 100);
-
-    document.getElementById("fill").style.width = percent + "%";
-    document.getElementById("text").innerText =
-      `Scraping ${data.done}/${data.total}`;
-
-    if (!data.running) {
-      clearInterval(interval);
-      document.getElementById("text").innerText = "Done!";
-      document.getElementById("download").style.display = "block";
-    }
-  }, 1000);
+  document.getElementById("status").innerText = "Done!";
+  document.getElementById("download").style.display = "block";
 }
 </script>
 
