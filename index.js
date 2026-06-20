@@ -8,6 +8,7 @@ const { chromium } = require("playwright");
 const { createObjectCsvWriter } = require("csv-writer");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static("public"));
@@ -16,26 +17,18 @@ const upload = multer({ dest: "uploads/" });
 
 /**
  * =========================
- * SSE PROGRESS SYSTEM
+ * GLOBAL PROGRESS STORE
  * =========================
  */
-let clients = [];
+let progress = {
+  total: 0,
+  done: 0,
+  running: false
+};
 
 app.get("/progress", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  clients.push(res);
-
-  req.on("close", () => {
-    clients = clients.filter(c => c !== res);
-  });
+  res.json(progress);
 });
-
-function sendProgress(data) {
-  clients.forEach(c => c.write(`data: ${JSON.stringify(data)}\n\n`));
-}
 
 /**
  * =========================
@@ -46,32 +39,14 @@ let browser;
 
 async function getBrowser() {
   if (!browser) {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
-    });
+    browser = await chromium.launch({ headless: true });
   }
   return browser;
 }
 
 async function newPage() {
   const b = await getBrowser();
-  const page = await b.newPage();
-
-  await page.setDefaultTimeout(20000);
-  await page.setDefaultNavigationTimeout(20000);
-
-  // SPEED BOOST
-  await page.route("**/*", (route) => {
-    const type = route.request().resourceType();
-    if (["image", "font", "media"].includes(type)) {
-      route.abort();
-    } else {
-      route.continue();
-    }
-  });
-
-  return page;
+  return await b.newPage();
 }
 
 /**
@@ -89,7 +64,9 @@ function cleanRow(row) {
 
   return {
     brand: c(row.brand || row.Brand),
-    product: c(row.product || row.Product || row.description)
+    product: c(row.product || row.Product || row.description),
+    type: c(row.type),
+    size: c(row.size),
   };
 }
 
@@ -98,11 +75,16 @@ function cleanRow(row) {
  * SCRAPER
  * =========================
  */
-async function scrape(row) {
+async function scrapeHeinemann(row) {
   const page = await newPage();
 
   try {
     const r = cleanRow(row);
+
+    if (!r.brand && !r.product) {
+      await page.close();
+      return null;
+    }
 
     const query = `${r.brand} ${r.product}`.trim();
 
@@ -110,37 +92,37 @@ async function scrape(row) {
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    const links = await page.$$eval("a", as =>
-      as
-        .map(a => ({ text: a.innerText, href: a.href }))
-        .filter(a => a.href && a.href.includes("/p/") && a.text?.length > 15)
-        .slice(0, 10)
-    );
+    const candidates = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("a"))
+        .map(el => ({
+          text: el.innerText || "",
+          href: el.href || ""
+        }))
+        .filter(x => x.href.includes("/p/") && x.text.length > 20)
+        .slice(0, 15);
+    });
 
-    if (!links.length) {
+    if (!candidates.length) {
       await page.close();
       return null;
     }
 
-    await page.goto(links[0].href, { waitUntil: "domcontentloaded" });
+    let best = candidates[0];
+
+    await page.goto(best.href, { waitUntil: "domcontentloaded" });
 
     const data = await page.evaluate(() => {
       const title = document.querySelector("h1")?.innerText || null;
       const text = document.body.innerText;
 
-      const priceMatch = text.match(/€\s?\d{1,4}[.,]\d{2}/);
+      const priceMatch = text.match(/€\s?\d+[.,]\d{2}/);
       const price = priceMatch
         ? parseFloat(priceMatch[0].replace("€", "").replace(",", "."))
         : null;
 
       const size = text.match(/(\d+)\s?ml/i)?.[1] || "NA";
 
-      const type =
-        text.toLowerCase().includes("eau de parfum") ? "edp" :
-        text.toLowerCase().includes("eau de toilette") ? "edt" :
-        "NA";
-
-      return { title, price, size, type };
+      return { title, price, size };
     });
 
     await page.close();
@@ -149,10 +131,9 @@ async function scrape(row) {
 
     return {
       product: data.title,
-      scraped_price: data.price,   // ✅ IMPORTANT COLUMN
+      scraped_price: data.price,   // 🔥 SEPARATE COLUMN
       currency: "EUR",
       size: data.size,
-      type: data.type,
       store: "Heinemann"
     };
 
@@ -164,83 +145,115 @@ async function scrape(row) {
 
 /**
  * =========================
- * BATCH WITH REAL PROGRESS
+ * BATCH ENGINE + PROGRESS
  * =========================
  */
 async function runBatch(rows) {
+  progress.total = rows.length;
+  progress.done = 0;
+  progress.running = true;
+
   const results = [];
+  let index = 0;
 
-  for (let i = 0; i < rows.length; i++) {
-    const percent = Math.round(((i + 1) / rows.length) * 100);
+  async function worker() {
+    while (index < rows.length) {
+      const i = index++;
 
-    sendProgress({
-      current: i + 1,
-      total: rows.length,
-      percent
-    });
+      const result = await scrapeHeinemann(rows[i]);
 
-    const result = await scrape(rows[i]);
+      const r = cleanRow(rows[i]);
 
-    results.push(
-      result || {
-        product: rows[i].product,
-        scraped_price: "NA",
-        currency: "NA",
-        size: "NA",
-        type: "NA",
-        store: "NO_RESULT"
-      }
-    );
+      results.push(
+        result || {
+          product: `${r.brand} ${r.product}`.trim(),
+          scraped_price: "NA",
+          currency: "NA",
+          size: "NA",
+          store: "NO_RESULT"
+        }
+      );
+
+      progress.done++;
+    }
   }
 
-  sendProgress({ done: true });
+  await Promise.all([
+    worker(),
+    worker(),
+    worker()
+  ]);
 
+  progress.running = false;
   return results;
 }
 
 /**
  * =========================
- * UPLOAD CSV
+ * UPLOAD API
  * =========================
  */
-app.post("/upload-csv-ui", upload.single("file"), async (req, res) => {
-  const rows = [];
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
 
-  fs.createReadStream(req.file.path)
-    .pipe(csv())
-    .on("data", (d) => rows.push(d))
-    .on("end", async () => {
+    const rows = [];
 
-      const results = await runBatch(rows);
+    fs.createReadStream(req.file.path)
+      .pipe(csv({ separator: /[\t,;]/ }))
+      .on("data", (row) => rows.push(row))
+      .on("end", async () => {
 
-      const outputPath = path.join(__dirname, "report.csv");
+        const results = await runBatch(rows);
 
-      const writer = createObjectCsvWriter({
-        path: outputPath,
-        header: [
-          { id: "product", title: "product" },
-          { id: "scraped_price", title: "scraped_price" },
-          { id: "currency", title: "currency" },
-          { id: "size", title: "size" },
-          { id: "type", title: "type" },
-          { id: "store", title: "store" }
-        ]
+        const file = path.join(__dirname, "report.csv");
+
+        const writer = createObjectCsvWriter({
+          path: file,
+          header: [
+            { id: "product", title: "product" },
+            { id: "scraped_price", title: "scraped_price" },
+            { id: "currency", title: "currency" },
+            { id: "size", title: "size" },
+            { id: "store", title: "store" }
+          ]
+        });
+
+        await writer.writeRecords(results);
+
+        fs.unlinkSync(req.file.path);
+
+        res.json({
+          success: true,
+          download: "/download"
+        });
       });
 
-      await writer.writeRecords(results);
-
-      fs.unlinkSync(req.file.path);
-
-      res.json({ success: true });
-    });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 /**
  * =========================
+ * DOWNLOAD
+ * =========================
  */
-app.get("/download-report", (req, res) => {
+app.get("/download", (req, res) => {
   res.download(path.join(__dirname, "report.csv"));
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("RUNNING ON", PORT));
+/**
+ * =========================
+ * START
+ * =========================
+ */
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🚀 SCRAPER READY");
+  console.log("POST /upload");
+  console.log("GET /download");
+  console.log("GET /progress");
+});

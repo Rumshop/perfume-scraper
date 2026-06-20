@@ -1,45 +1,23 @@
-async function uploadFile() {
-  const file = document.getElementById("fileInput").files[0];
+async function upload() {
+  const file = document.getElementById("file").files[0];
 
-  if (!file) {
-    alert("Select a file first");
-    return;
-  }
+  const form = new FormData();
+  form.append("file", file);
 
-  const formData = new FormData();
-  formData.append("file", file);
-
-  document.getElementById("status").innerText = "Processing... ⏳";
-
-  const res = await fetch("/upload-csv-ui", {
+  await fetch("/upload", {
     method: "POST",
-    body: formData
+    body: form,
   });
 
-  const data = await res.json();
-
-  document.getElementById("status").innerText = "Done ✅";
-
-  document.getElementById("downloadLink").style.display = "block";
-
-  renderTable(data.results);
+  poll();
 }
 
-function renderTable(data) {
-  const tbody = document.getElementById("tableBody");
-  tbody.innerHTML = "";
+function poll() {
+  setInterval(async () => {
+    const res = await fetch("/progress");
+    const data = await res.json();
 
-  data.forEach(row => {
-    const tr = document.createElement("tr");
-
-    tr.innerHTML = `
-      <td>${row.product}</td>
-      <td>${row.heinemann_price}</td>
-      <td>${row.size}</td>
-      <td>${row.type}</td>
-      <td>${row.cheapest_store}</td>
-    `;
-
-    tbody.appendChild(tr);
-  });
+    document.getElementById("bar").style.width = data.progress + "%";
+    document.getElementById("text").innerText = data.progress + "% done";
+  }, 1000);
 }
