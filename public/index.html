@@ -2,60 +2,99 @@
 <html>
 <head>
   <title>Perfume Scraper</title>
-  <style>
-    body { font-family: Arial; background:#111; color:white; padding:40px; }
-    .box { max-width:600px; margin:auto; background:#222; padding:20px; border-radius:10px; }
-    input, button { width:100%; padding:10px; margin-top:10px; }
-    button { background:#00c853; border:none; color:white; }
 
-    .bar { height:20px; background:#333; margin-top:20px; border-radius:10px; overflow:hidden; }
-    .fill { height:100%; width:0%; background:lime; transition:0.3s; }
+  <style>
+    body {
+      font-family: Arial;
+      background: #0f172a;
+      color: white;
+      text-align: center;
+      padding: 40px;
+    }
+
+    .box {
+      background: #1e293b;
+      padding: 20px;
+      border-radius: 12px;
+      width: 400px;
+      margin: auto;
+    }
+
+    input, button {
+      padding: 10px;
+      margin-top: 10px;
+      width: 100%;
+    }
+
+    button {
+      background: #22c55e;
+      border: none;
+      color: white;
+      cursor: pointer;
+    }
+
+    .bar {
+      width: 100%;
+      background: #334155;
+      border-radius: 10px;
+      margin-top: 20px;
+    }
+
+    .fill {
+      height: 20px;
+      width: 0%;
+      background: #22c55e;
+      border-radius: 10px;
+    }
   </style>
 </head>
+
 <body>
 
 <div class="box">
   <h2>Perfume Scraper</h2>
 
-  <input type="file" id="file">
+  <input type="file" id="file" />
   <button onclick="upload()">Upload</button>
 
   <div class="bar">
-    <div class="fill" id="fill"></div>
+    <div id="fill" class="fill"></div>
   </div>
 
-  <div id="status">Waiting...</div>
+  <p id="status">Waiting...</p>
 
   <a id="download" style="display:none" href="/download-report">Download Report</a>
 </div>
 
 <script>
-const ws = new WebSocket("ws://localhost:3000");
+const eventSource = new EventSource("/progress");
 
-ws.onmessage = (e) => {
-  const d = JSON.parse(e.data);
+eventSource.onmessage = (e) => {
+  const data = JSON.parse(e.data);
 
-  if (d.percent !== undefined) {
-    document.getElementById("fill").style.width = d.percent + "%";
-    document.getElementById("status").innerText =
-      `Scraping ${d.current}/${d.total} (${d.percent}%)`;
-  }
-
-  if (d.done) {
-    document.getElementById("status").innerText = "Done ✅";
+  if (data.done) {
+    document.getElementById("status").innerText = "DONE ✅";
+    document.getElementById("fill").style.width = "100%";
     document.getElementById("download").style.display = "block";
+    return;
   }
+
+  document.getElementById("fill").style.width = data.percent + "%";
+  document.getElementById("status").innerText =
+    `Processing ${data.current}/${data.total} (${data.percent}%)`;
 };
 
-function upload() {
+async function upload() {
   const file = document.getElementById("file").files[0];
 
-  const fd = new FormData();
-  fd.append("file", file);
+  const form = new FormData();
+  form.append("file", file);
 
-  fetch("/upload-csv-ui", {
+  document.getElementById("status").innerText = "Uploading...";
+
+  await fetch("/upload-csv-ui", {
     method: "POST",
-    body: fd
+    body: form
   });
 }
 </script>
